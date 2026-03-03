@@ -1,0 +1,7 @@
+{
+  "name": "ShakTranslate",
+  "description": "Real-time voice-to-voice translator for meetings with foreign delegates, featuring language detection and English translation.",
+  "requestFramePermissions": [
+    "microphone"
+  ]
+}
