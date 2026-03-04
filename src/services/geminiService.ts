@@ -1,4 +1,4 @@
-import { GoogleGenAI, Modality, Type, ThinkingLevel } from "@google/genai";
+import { GoogleGenAI, Type } from "@google/genai";
 
 const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
 
@@ -10,24 +10,22 @@ export interface TranslationResult {
 
 export async function translateAudio(base64Audio: string, mimeType: string): Promise<TranslationResult> {
   const response = await ai.models.generateContent({
-    model: "gemini-3-flash-preview",
-    contents: [
-      {
-        parts: [
-          {
-            inlineData: {
-              data: base64Audio,
-              mimeType: mimeType,
-            },
+    model: "gemini-2.5-flash",
+    contents: {
+      parts: [
+        {
+          inlineData: {
+            data: base64Audio,
+            mimeType: mimeType,
           },
-          {
-            text: "Detect language and translate to English. Return JSON.",
-          },
-        ],
-      },
-    ],
+        },
+        {
+          text: "Detect language and translate to English. Return JSON.",
+        },
+      ],
+    },
     config: {
-      thinkingConfig: { thinkingLevel: ThinkingLevel.LOW },
+      responseModalities: ["TEXT"],
       responseMimeType: "application/json",
       responseSchema: {
         type: Type.OBJECT,
@@ -73,7 +71,7 @@ export async function generateSpeech(text: string): Promise<SpeechResponse> {
     model: "gemini-2.5-flash-preview-tts",
     contents: [{ parts: [{ text: text }] }],
     config: {
-      responseModalities: [Modality.AUDIO],
+      responseModalities: ["AUDIO"],
       speechConfig: {
         voiceConfig: {
           prebuiltVoiceConfig: { voiceName: 'Kore' },
@@ -85,7 +83,7 @@ export async function generateSpeech(text: string): Promise<SpeechResponse> {
   const part = response.candidates?.[0]?.content?.parts?.[0];
   const base64Audio = part?.inlineData?.data;
   const mimeType = part?.inlineData?.mimeType || 'audio/pcm';
-  
+
   if (!base64Audio) {
     throw new Error("Failed to generate speech");
   }
