@@ -3,17 +3,17 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
-import { 
-  Mic, 
-  MicOff, 
-  Volume2, 
-  VolumeX, 
-  Play, 
-  Pause, 
-  RotateCcw, 
-  Languages, 
+import {
+  Mic,
+  MicOff,
+  Volume2,
+  VolumeX,
+  Play,
+  Pause,
+  RotateCcw,
+  Languages,
   Globe,
   MessageSquare,
   ChevronRight,
@@ -49,7 +49,7 @@ export default function App() {
     { code: 'ar-SA', name: 'Arabic' },
     { code: 'zh-CN', name: 'Mandarin' },
   ];
-  
+
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const audioChunksRef = useRef<Blob[]>([]);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -57,6 +57,10 @@ export default function App() {
   const [audioLevel, setAudioLevel] = useState(0);
   const animationFrameRef = useRef<number | null>(null);
   const liveSessionRef = useRef<any>(null);
+
+  // Global audio management
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const [playingUrl, setPlayingUrl] = useState<string | null>(null);
 
   const [isSpeechSupported, setIsSpeechSupported] = useState(true);
 
@@ -86,7 +90,7 @@ export default function App() {
     try {
       const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
       initAudioContext(stream);
-      
+
       // Reset states
       setRealtimeTranscript("");
       setCurrentTranslation(null);
@@ -103,9 +107,9 @@ export default function App() {
         'audio/aac',
         'audio/wav'
       ];
-      
+
       const supportedMimeType = mimeTypes.find(type => MediaRecorder.isTypeSupported(type)) || '';
-      
+
       const mediaRecorder = new MediaRecorder(stream, supportedMimeType ? { mimeType: supportedMimeType } : {});
       mediaRecorderRef.current = mediaRecorder;
       audioChunksRef.current = [];
@@ -134,7 +138,7 @@ export default function App() {
         recognition.continuous = true;
         recognition.interimResults = true;
         recognition.lang = selectedLang;
-        
+
         recognition.onstart = () => {
           console.log("Speech recognition session started");
         };
@@ -221,7 +225,7 @@ export default function App() {
     setStatusMessage("Analyzing audio...");
     try {
       const base64Audio = await blobToBase64(blob);
-      
+
       // 1. Translate Audio using Gemini
       setStatusMessage("Translating...");
       const result = await translateAudio(base64Audio, blob.type || 'audio/webm');
@@ -237,26 +241,26 @@ export default function App() {
           setStatusMessage("Generating voice...");
           // Add a timeout to prevent infinite loading
           const ttsPromise = generateSpeech(result.translatedText);
-          const timeoutPromise = new Promise((_, reject) => 
+          const timeoutPromise = new Promise((_, reject) =>
             setTimeout(() => reject(new Error("Voice generation timed out")), 15000)
           );
-          
+
           const ttsResponse = await Promise.race([ttsPromise, timeoutPromise]) as SpeechResponse;
-          
+
           let ttsBlob: Blob;
           if (ttsResponse.mimeType.includes('pcm')) {
             ttsBlob = pcmToWav(ttsResponse.data);
           } else {
             ttsBlob = await (await fetch(`data:${ttsResponse.mimeType};base64,${ttsResponse.data}`)).blob();
           }
-          
+
           finalAudioUrl = URL.createObjectURL(ttsBlob);
           setCurrentAudioUrl(finalAudioUrl);
           setStatusMessage(null);
-          
-          // Play automatically
+
+          // Play automatically after generation
           if (finalAudioUrl) {
-            await playAudio(finalAudioUrl);
+            await togglePlayback(finalAudioUrl);
           }
         } catch (ttsErr: any) {
           console.error("TTS Error:", ttsErr);
@@ -284,19 +288,64 @@ export default function App() {
     }
   };
 
-  const playAudio = async (url: string) => {
-    if (url) {
-      try {
-        const audio = new Audio(url);
-        await audio.play();
-      } catch (err) {
-        console.error("Audio playback failed:", err);
-        // If auto-play fails, we might need a user gesture
-        setStatusMessage("Tap play to hear translation");
-        setTimeout(() => setStatusMessage(null), 3000);
-      }
+  // Mute effect: reactively mute/unmute existing audio when isMuted changes
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.muted = isMuted;
     }
-  };
+  }, [isMuted]);
+
+  const stopCurrentAudio = useCallback(() => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      audioRef.current.onended = null;
+      audioRef.current.onpause = null;
+      audioRef.current.onplay = null;
+      audioRef.current = null;
+    }
+    setPlayingUrl(null);
+  }, []);
+
+  const togglePlayback = useCallback(async (url: string) => {
+    // If this URL is already playing, pause it
+    if (playingUrl === url && audioRef.current && !audioRef.current.paused) {
+      audioRef.current.pause();
+      return;
+    }
+
+    // If the same URL is paused, resume it
+    if (playingUrl === url && audioRef.current && audioRef.current.paused) {
+      try {
+        await audioRef.current.play();
+      } catch (err) {
+        console.error("Audio resume failed:", err);
+      }
+      return;
+    }
+
+    // Otherwise stop current and start new
+    stopCurrentAudio();
+
+    const audio = new Audio(url);
+    audio.muted = isMuted;
+    audioRef.current = audio;
+
+    audio.onplay = () => setPlayingUrl(url);
+    audio.onpause = () => setPlayingUrl(null);
+    audio.onended = () => {
+      setPlayingUrl(null);
+      audioRef.current = null;
+    };
+
+    try {
+      await audio.play();
+    } catch (err) {
+      console.error("Audio playback failed:", err);
+      setStatusMessage("Tap play to hear translation");
+      setTimeout(() => setStatusMessage(null), 3000);
+      audioRef.current = null;
+    }
+  }, [playingUrl, isMuted, stopCurrentAudio]);
 
   return (
     <div className="min-h-screen bg-dark-bg flex flex-col max-w-md mx-auto relative overflow-hidden">
@@ -318,7 +367,7 @@ export default function App() {
             </button>
           </div>
         </div>
-        
+
         <div className="flex items-center gap-2 overflow-x-auto pb-2 scrollbar-hide">
           {languages.map((lang) => (
             <button
@@ -326,8 +375,8 @@ export default function App() {
               onClick={() => setSelectedLang(lang.code)}
               className={cn(
                 "px-3 py-1.5 rounded-full text-[10px] font-mono uppercase tracking-wider transition-all whitespace-nowrap",
-                selectedLang === lang.code 
-                  ? "bg-neon-green text-black font-bold" 
+                selectedLang === lang.code
+                  ? "bg-neon-green text-black font-bold"
                   : "bg-white/5 text-white/40 hover:bg-white/10"
               )}
             >
@@ -368,11 +417,11 @@ export default function App() {
                   {[...Array(8)].map((_, i) => (
                     <motion.div
                       key={`bar-${i}`}
-                      animate={{ 
+                      animate={{
                         height: [8, 8 + (audioLevel * 40 * Math.random()), 8],
                       }}
-                      transition={{ 
-                        repeat: Infinity, 
+                      transition={{
+                        repeat: Infinity,
                         duration: 0.2,
                         delay: i * 0.05
                       }}
@@ -380,9 +429,9 @@ export default function App() {
                     />
                   ))}
                 </div>
-                
+
                 {realtimeTranscript && (
-                  <motion.div 
+                  <motion.div
                     initial={{ opacity: 0, y: 10 }}
                     animate={{ opacity: 1, y: 0 }}
                     className="bg-white/5 p-4 rounded-xl border border-white/10 max-w-xs mx-auto"
@@ -397,11 +446,11 @@ export default function App() {
                     </p>
                   </motion.div>
                 )}
-                
+
                 {!isSpeechSupported && (
                   <p className="text-white/20 text-[10px] uppercase tracking-tighter">Real-time transcription not supported in this browser</p>
                 )}
-                
+
                 <p className="text-neon-green font-mono text-sm tracking-widest uppercase">Listening...</p>
               </motion.div>
             )}
@@ -426,10 +475,10 @@ export default function App() {
             )}
 
             {statusMessage && !isRecording && (
-              <motion.p 
+              <motion.p
                 key="status-message"
-                initial={{ opacity: 0 }} 
-                animate={{ opacity: 1 }} 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 className="text-white/40 font-mono text-xs tracking-widest uppercase"
               >
@@ -438,16 +487,16 @@ export default function App() {
             )}
 
             {error && !isRecording && (
-              <motion.div 
+              <motion.div
                 key="error-state"
-                initial={{ opacity: 0 }} 
-                animate={{ opacity: 1 }} 
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
                 exit={{ opacity: 0 }}
                 className="bg-red-500/10 border border-red-500/20 p-4 rounded-xl text-red-500 text-xs"
               >
                 <p className="font-bold mb-1 uppercase tracking-wider">Error</p>
                 <p>{error}</p>
-                <button 
+                <button
                   onClick={() => setError(null)}
                   className="mt-2 text-[10px] underline uppercase tracking-widest opacity-60 hover:opacity-100"
                 >
@@ -473,15 +522,15 @@ export default function App() {
                       <p className="text-white/60 text-sm italic mb-2">"{currentTranslation.originalText}"</p>
                       <p className="text-lg font-medium leading-tight">{currentTranslation.translatedText}</p>
                     </div>
-                  <div className="flex flex-col items-center gap-3">
-                    <button 
-                      disabled={!currentAudioUrl || isGeneratingVoice}
-                      onClick={() => currentAudioUrl && playAudio(currentAudioUrl)}
-                      className={cn(
-                        "w-16 h-16 rounded-full flex items-center justify-center transition-all shadow-2xl border-4 border-dark-bg",
-                        currentAudioUrl && !isGeneratingVoice 
-                          ? "bg-neon-green text-black hover:scale-110 shadow-neon-green/40 active:scale-95" 
-                          : "bg-white/5 text-white/10 cursor-not-allowed border-white/5"
+                    <div className="flex flex-col items-center gap-3">
+                      <button
+                        disabled={!currentAudioUrl || isGeneratingVoice}
+                        onClick={() => currentAudioUrl && togglePlayback(currentAudioUrl)}
+                        className={cn(
+                          "w-16 h-16 rounded-full flex items-center justify-center transition-all shadow-2xl border-4 border-dark-bg",
+                          currentAudioUrl && !isGeneratingVoice
+                            ? "bg-neon-green text-black hover:scale-110 shadow-neon-green/40 active:scale-95"
+                            : "bg-white/5 text-white/10 cursor-not-allowed border-white/5"
                         )}
                       >
                         {isGeneratingVoice ? (
@@ -490,15 +539,17 @@ export default function App() {
                             transition={{ repeat: Infinity, duration: 1, ease: "linear" }}
                             className="w-6 h-6 border-2 border-white/10 border-t-white rounded-full"
                           />
+                        ) : (currentAudioUrl && playingUrl === currentAudioUrl ? (
+                          <Pause size={32} />
                         ) : (
-                          <Volume2 size={32} />
-                        )}
+                          <Play size={32} />
+                        ))}
                       </button>
                       <span className={cn(
                         "text-[10px] font-mono uppercase tracking-widest font-bold",
                         currentAudioUrl && !isGeneratingVoice ? "text-neon-green" : "text-white/20"
                       )}>
-                        {isGeneratingVoice ? "Loading..." : "Play Voice"}
+                        {isGeneratingVoice ? "Loading..." : (playingUrl === currentAudioUrl ? "Pause" : "Play Voice")}
                       </span>
                     </div>
                   </div>
@@ -515,7 +566,7 @@ export default function App() {
               <MessageSquare size={14} /> Recent Translations
             </h2>
             {history.length > 0 && (
-              <button 
+              <button
                 onClick={() => setHistory([])}
                 className="text-xs text-white/20 hover:text-white/60 transition-colors"
               >
@@ -523,7 +574,7 @@ export default function App() {
               </button>
             )}
           </div>
-          
+
           <div className="space-y-3">
             {history.map((item) => (
               <motion.div
@@ -542,17 +593,19 @@ export default function App() {
                   <p className="text-sm font-medium truncate">{item.translatedText}</p>
                 </div>
                 <div className="flex items-center gap-3">
-                  <button 
-                    onClick={() => item.audioUrl && playAudio(item.audioUrl)}
+                  <button
+                    onClick={() => item.audioUrl && togglePlayback(item.audioUrl)}
                     disabled={!item.audioUrl}
                     className={cn(
                       "w-10 h-10 rounded-full flex items-center justify-center transition-all",
-                      item.audioUrl 
-                        ? "bg-neon-green/10 text-neon-green hover:bg-neon-green hover:text-black" 
+                      item.audioUrl
+                        ? "bg-neon-green/10 text-neon-green hover:bg-neon-green hover:text-black"
                         : "bg-white/5 text-white/10 cursor-not-allowed"
                     )}
                   >
-                    <Volume2 size={16} />
+                    {item.audioUrl && playingUrl === item.audioUrl
+                      ? <Pause size={16} />
+                      : <Play size={16} />}
                   </button>
                 </div>
               </motion.div>
@@ -564,7 +617,7 @@ export default function App() {
       {/* Controls */}
       <div className="p-8 bg-gradient-to-t from-dark-bg via-dark-bg to-transparent">
         <div className="flex items-center justify-between gap-6">
-          <button 
+          <button
             onClick={() => setIsMuted(!isMuted)}
             className={cn(
               "w-12 h-12 rounded-2xl flex items-center justify-center transition-all",
@@ -580,14 +633,14 @@ export default function App() {
               onClick={isRecording ? stopRecording : startRecording}
               className={cn(
                 "w-20 h-20 rounded-full flex items-center justify-center transition-all relative z-10",
-                isRecording 
-                  ? "bg-red-500 text-white shadow-[0_0_30px_rgba(239,68,68,0.4)]" 
+                isRecording
+                  ? "bg-red-500 text-white shadow-[0_0_30px_rgba(239,68,68,0.4)]"
                   : "bg-neon-green text-black shadow-[0_0_30px_rgba(57,255,20,0.4)]"
               )}
             >
               {isRecording ? <MicOff size={32} /> : <Mic size={32} />}
             </motion.button>
-            
+
             {isRecording && (
               <motion.div
                 initial={{ scale: 1, opacity: 0.5 }}
@@ -598,9 +651,11 @@ export default function App() {
             )}
           </div>
 
-          <button 
+          <button
             onClick={() => {
+              stopCurrentAudio();
               setCurrentTranslation(null);
+              setCurrentAudioUrl(null);
               setHistory([]);
             }}
             className="w-12 h-12 rounded-2xl bg-white/5 flex items-center justify-center text-white/60 hover:text-white transition-all"
@@ -626,16 +681,16 @@ const pcmToWav = (base64: string, sampleRate: number = 24000): Blob => {
   for (let i = 0; i < len; i++) {
     bytes[i] = binaryString.charCodeAt(i);
   }
-  
+
   const buffer = new ArrayBuffer(44 + bytes.length);
   const view = new DataView(buffer);
-  
+
   const writeString = (offset: number, string: string) => {
     for (let i = 0; i < string.length; i++) {
       view.setUint8(offset + i, string.charCodeAt(i));
     }
   };
-  
+
   writeString(0, 'RIFF');
   view.setUint32(4, 36 + bytes.length, true);
   writeString(8, 'WAVE');
@@ -649,10 +704,10 @@ const pcmToWav = (base64: string, sampleRate: number = 24000): Blob => {
   view.setUint16(34, 16, true); // Bits per sample
   writeString(36, 'data');
   view.setUint32(40, bytes.length, true);
-  
+
   for (let i = 0; i < bytes.length; i++) {
     view.setUint8(44 + i, bytes[i]);
   }
-  
+
   return new Blob([buffer], { type: 'audio/wav' });
 };
